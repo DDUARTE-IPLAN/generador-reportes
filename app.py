@@ -3,7 +3,14 @@ import pandas as pd
 from datetime import datetime
 import io
 
-st.title("📊 Generador de Reportes Automático")
+col1, col2 = st.columns([1, 5])
+
+with col1:
+    st.image("mi_logo.png", use_container_width=True)
+
+with col2:
+    st.title("Generador de Reportes Automático")
+
 uploaded_file = st.file_uploader("Subí tu archivo CSV", type="csv")
 
 if uploaded_file is not None:
@@ -34,8 +41,6 @@ if uploaded_file is not None:
     df = df.drop(columns=[col for col in columnas_a_eliminar if col in df.columns])
 
     df["FECHA DE ACTIVACION"] = pd.to_datetime(df["FECHA DE ACTIVACION"], errors="coerce")
-    df["FECHA DE ACTIVACION"] = df["FECHA DE ACTIVACION"].dt.strftime("%d/%m/%Y")
-
     df["FECHA DE CREACION"] = pd.to_datetime(df["FECHA DE CREACION"], errors="coerce")
     hoy = pd.Timestamp.today().normalize()
     df["DIAS ABIERTA"] = (hoy - df["FECHA DE CREACION"]).dt.days
@@ -51,9 +56,6 @@ if uploaded_file is not None:
         (df_abiertas["ESTADO"] == "InProgress") &
         (df_abiertas["CATEGORIA"] != "Deactivation")
     ].sort_values(by="DIAS ABIERTA", ascending=False).head(20).copy()
-
-    df_top_20_abiertas["FECHA DE CREACION"] = pd.to_datetime(df_top_20_abiertas["FECHA DE CREACION"], errors="coerce")
-    df_top_20_abiertas["FECHA DE CREACION"] = df_top_20_abiertas["FECHA DE CREACION"].dt.strftime("%d/%m/%Y")
 
     if "FECHA DE ACTIVACION" in df_top_20_abiertas.columns:
         df_top_20_abiertas = df_top_20_abiertas.drop(columns=["FECHA DE ACTIVACION"])
@@ -97,13 +99,32 @@ if uploaded_file is not None:
         format='%B %Y', errors='coerce'
     ), reverse=True)
 
+    df_activadas = df[df["ESTADO"] == "Completed"].copy()
+
+    # 🔔 Formatear fechas en todas las hojas antes de exportar
+    for df_tmp in [df, df_abiertas, df_top_20_abiertas, df_bajas, df_activadas]:
+        if "FECHA DE CREACION" in df_tmp.columns:
+            df_tmp["FECHA DE CREACION"] = pd.to_datetime(df_tmp["FECHA DE CREACION"], errors="coerce").dt.strftime("%d/%m/%Y")
+        if "FECHA DE ACTIVACION" in df_tmp.columns:
+            df_tmp["FECHA DE ACTIVACION"] = pd.to_datetime(df_tmp["FECHA DE ACTIVACION"], errors="coerce").dt.strftime("%d/%m/%Y")
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, sheet_name="TODAS LAS ORDENES", index=False)
-        df_abiertas.to_excel(writer, sheet_name="ORDENES ABIERTAS", index=False)
-        df_top_20_abiertas.to_excel(writer, sheet_name="TOP 20 + ABIERTAS", index=False)
-        df_bajas.to_excel(writer, sheet_name="BAJAS", index=False)
+        # Función auxiliar para ajustar ancho automáticamente
+        def export_and_autofit(df_export, sheet_name):
+            df_export.to_excel(writer, sheet_name=sheet_name, index=False)
+            worksheet = writer.sheets[sheet_name]
+            for i, col in enumerate(df_export.columns):
+                column_len = max(df_export[col].astype(str).map(len).max(), len(col)) + 2
+                worksheet.set_column(i, i, column_len)
 
+        export_and_autofit(df, "TODAS LAS ORDENES")
+        export_and_autofit(df_abiertas, "ORDENES ABIERTAS")
+        export_and_autofit(df_top_20_abiertas, "TOP 20 + ABIERTAS")
+        export_and_autofit(df_bajas, "BAJAS")
+        export_and_autofit(df_activadas, "ORDENES ACTIVADAS")
+
+        # ACTIVACIONES POR MODELO queda igual (sin autofit especial)
         workbook = writer.book
         worksheet = workbook.add_worksheet("ACTIVACIONES POR MODELO")
         writer.sheets["ACTIVACIONES POR MODELO"] = worksheet
@@ -121,9 +142,14 @@ if uploaded_file is not None:
                 margins=True,
                 margins_name="Suma total"
             )
+
             worksheet.write(startrow, 0, mes)
             tabla_mes.reset_index().to_excel(writer, sheet_name="ACTIVACIONES POR MODELO", startrow=startrow + 1, index=False)
             startrow += len(tabla_mes) + 4
+
+            worksheet.set_column(0, 0, 48)  
+            worksheet.set_column(1, 10, 13)  
+        
 
     output.seek(0)
     st.success("✅ Reporte generado con éxito")
@@ -133,5 +159,6 @@ if uploaded_file is not None:
         file_name=nombre_reporte,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 else:
     st.info("📥 Subí un archivo CSV para comenzar.")

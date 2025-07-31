@@ -1,7 +1,6 @@
 import pandas as pd
-import io
 
-def procesar_reporte_general(df):
+def procesar_reporte_general(df, output):
     # Renombrar columnas
     df.columns = [col.strip() for col in df.columns]
     df = df.rename(columns={
@@ -49,7 +48,7 @@ def procesar_reporte_general(df):
         df_top_20_abiertas = df_top_20_abiertas.drop(columns=["FECHA DE ACTIVACION"])
 
     df_bajas = df[
-        (df["CATEGORIA"] == "Deactivation") &
+        (df["CATEGORIA"] == "Deactivation") & 
         (df["ESTADO"] != "Completed")
     ].copy()
 
@@ -61,7 +60,7 @@ def procesar_reporte_general(df):
     df_bajas = df_bajas.sort_values(by="DIAS ABIERTA", ascending=False)
 
     df_activaciones = df[
-        (df["ESTADO"] == "Completed") &
+        (df["ESTADO"] == "Completed") & 
         (df["CATEGORIA"] == "SalesOrder")
     ].copy()
 
@@ -91,11 +90,12 @@ def procesar_reporte_general(df):
     # Formatear fechas en todas las hojas antes de exportar
     for df_tmp in [df, df_abiertas, df_top_20_abiertas, df_bajas, df_activadas]:
         if "FECHA DE CREACION" in df_tmp.columns:
-            df_tmp["FECHA DE CREACION"] = pd.to_datetime(df_tmp["FECHA DE CREACION"], errors="coerce").dt.strftime("%d/%m/%Y")
+            df_tmp.loc[:, "FECHA DE CREACION"] = pd.to_datetime(df_tmp["FECHA DE CREACION"], errors="coerce")
+            df_tmp.loc[:, "FECHA DE CREACION"] = df_tmp["FECHA DE CREACION"].dt.strftime("%d/%m/%Y").astype(str)
         if "FECHA DE ACTIVACION" in df_tmp.columns:
-            df_tmp["FECHA DE ACTIVACION"] = pd.to_datetime(df_tmp["FECHA DE ACTIVACION"], errors="coerce").dt.strftime("%d/%m/%Y")
+            df_tmp.loc[:, "FECHA DE ACTIVACION"] = pd.to_datetime(df_tmp["FECHA DE ACTIVACION"], errors="coerce")
+            df_tmp.loc[:, "FECHA DE ACTIVACION"] = df_tmp["FECHA DE ACTIVACION"].dt.strftime("%d/%m/%Y").astype(str)
 
-    output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         # Función auxiliar para ajustar ancho automáticamente
         def export_and_autofit(df_export, sheet_name):
@@ -138,4 +138,3 @@ def procesar_reporte_general(df):
             worksheet.set_column(1, 10, 13)
 
     output.seek(0)
-    return output

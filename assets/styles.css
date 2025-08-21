@@ -1,0 +1,56 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
+:root {
+  --brand: #111827;
+  --bg-grad-top: #f8fafc;
+  --bg-grad-bottom: #eef2ff;
+}
+
+html, body, .stApp {
+  font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* Fondo suave y ancho cómodo */
+.stApp {
+  background: linear-gradient(180deg, var(--bg-grad-top), var(--bg-grad-bottom));
+}
+.block-container {
+  max-width: 980px;
+  padding-top: 2.5rem;
+  padding-bottom: 3rem;
+}
+
+/* “Tarjeta” contenedora */
+.app-card {
+  background: #ffffff;
+  border-radius: 1.25rem;      /* ~rounded-2xl */
+  box-shadow: 0 8px 30px rgba(0,0,0,0.06);
+  padding: 1.25rem;
+  border: 1px solid #eef2f7;
+}
+
+/* Uploader y botones más prolijos */
+[data-testid="stFileUploader"] > div {
+  border: 1px dashed #cbd5e1;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  background: #fbfdff;
+}
+.stButton > button, .stDownloadButton > button {
+  border-radius: 0.75rem;
+  padding: 0.6rem 1rem;
+  font-weight: 600;
+}
+.stButton > button[kind="primary"] {
+  background: var(--brand);
+  color: #fff;
+  border: 1px solid #0b1220;
+}
+
+/* Mensaje de éxito */
+.success-card {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: 0.75rem;
+  padding: 0.9rem 1rem;
+}

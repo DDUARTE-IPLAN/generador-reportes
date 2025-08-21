@@ -1,0 +1,7 @@
+[theme]
+base="light"
+primaryColor="#111827"        # negro/gris oscuro para botones
+backgroundColor="#f8fafc"     # gris muy claro
+secondaryBackgroundColor="#ffffff"
+textColor="#0f172a"
+font="sans serif"

@@ -50,6 +50,32 @@ div[data-baseweb="select"] > div { min-height: 38px; }
 """
 st.markdown(COMPACT_CSS, unsafe_allow_html=True)
 
+# ================== Helpers de compatibilidad width ==================
+def ui_dataframe(df: pd.DataFrame):
+    """Compat: width='stretch' si está disponible; sino use_container_width=True."""
+    try:
+        return st.dataframe(df, width="stretch")
+    except TypeError:
+        return st.dataframe(df, use_container_width=True)
+
+def ui_plotly(fig, *, height: Optional[int] = None):
+    try:
+        return st.plotly_chart(fig, width="stretch", height=height)
+    except TypeError:
+        return st.plotly_chart(fig, use_container_width=True)
+
+def ui_button(label: str, **kwargs):
+    try:
+        return st.button(label, width="stretch", **kwargs)
+    except TypeError:
+        return st.button(label, use_container_width=True, **kwargs)
+
+def ui_download_button(label: str, **kwargs):
+    try:
+        return st.download_button(label, width="stretch", **kwargs)
+    except TypeError:
+        return st.download_button(label, use_container_width=True, **kwargs)
+
 # ================== Logo opcional ==================
 def get_base64_of_bin_file(path: str) -> Optional[str]:
     try:
@@ -69,13 +95,9 @@ if "history" not in st.session_state:
     # cada item: {"filename","payload","script","when","views","df_raw"}
     st.session_state.history = []
 
-# Fuente de la verdad de meses seleccionados
+# Fuente de la verdad del filtro de meses
 if "selected_months" not in st.session_state:
     st.session_state.selected_months: List[str] = []
-
-# Valor “pendiente” para forzar el widget en el próximo rerun
-if "pending_months_value" not in st.session_state:
-    st.session_state.pending_months_value: Optional[List[str]] = None
 
 MAX_HISTORY = 5
 
@@ -156,11 +178,9 @@ def _filter_by_months(df: pd.DataFrame, selected: List[str]) -> pd.DataFrame:
     etiquetas = fechas.apply(_month_label)
     return df[etiquetas.isin(selected)].copy()
 
-# Patrones de estados (flexibles ES/EN)
-# Después (no-capturantes)
+# Patrones de estados (flexibles ES/EN) — grupos NO capturantes para evitar warnings
 RE_IN_PROGRESS = re.compile(r"\b(?:in\s*progres+s?|in\s*progress|en\s*progres?o|en\s*proceso)\b", re.I)
 RE_COMPLETED   = re.compile(r"(?:completad|complete|closed|finaliz)", re.I)
-
 
 def _normalize_for_excel(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -231,7 +251,6 @@ def build_auto_views(df: pd.DataFrame):
     # Si no hay selección previa, setear último mes
     if meses_disponibles and not st.session_state.selected_months:
         st.session_state.selected_months = [meses_disponibles[-1]]
-        st.session_state.pending_months_value = st.session_state.selected_months.copy()
 
     df_f = _filter_by_months(df, st.session_state.selected_months)
 
@@ -254,7 +273,7 @@ def build_auto_views(df: pd.DataFrame):
 
     views: Dict[str, Dict[str, Any]] = {}
 
-    # 1) Órdenes por PM
+    # 1) Órdenes por PM (dos gráficos pequeños: activas y completadas)
     if col_res and col_est:
         estados = base[col_est].astype(str)
 
@@ -341,7 +360,6 @@ def build_auto_views(df: pd.DataFrame):
                .size().rename(columns={"size": "CANTIDAD"})
                .sort_values(["MES", "CLOUD"])
         )
-        # df=None -> NO se muestra tabla en la pestaña
         views["Nubes de terceros"] = {
             "df": None,
             "charts": [
@@ -371,7 +389,7 @@ def build_auto_views(df: pd.DataFrame):
         views["Evolución mensual"] = {"df": pd.DataFrame(), "charts": []}
 
     ordered = {k: views.get(k, {"df": pd.DataFrame(), "charts": []}) for k in VIS_TABS_ORDER}
-    return ordered, meses_disponibles
+    return ordered
 
 
 def render_views(views: Dict[str, Dict[str, Any]]) -> None:
@@ -385,7 +403,7 @@ def render_views(views: Dict[str, Dict[str, Any]]) -> None:
 
             # Solo mostramos tabla si df_default no es None/empty.
             if df_default is not None and isinstance(df_default, pd.DataFrame) and not df_default.empty:
-                st.dataframe(df_default, width="stretch")
+                ui_dataframe(df_default)
 
             if charts and HAS_PLOTLY:
                 half_charts = [c for c in charts if c.get("layout") == "half"]
@@ -425,7 +443,7 @@ def _plot_chart(cfg: Dict[str, Any], df_default: Optional[pd.DataFrame], height:
         height=height,
         legend=dict(orientation="h", yanchor="bottom", y=-0.2),
     )
-    st.plotly_chart(fig, width="stretch")
+    ui_plotly(fig, height=height)
 
 
 def build_excel_from_views(views: Dict[str, Dict[str, Any]]) -> bytes:
@@ -456,16 +474,15 @@ with c_right:
     opcion = st.selectbox("Tipo de procesamiento", ["", "Reporte General", "Script 2"], index=0, label_visibility="collapsed")
     if st.session_state.uploaded_file:
         st.markdown(f"<span class='badge'>Archivo: {st.session_state.uploaded_file.name}</span>", unsafe_allow_html=True)
-        if st.button("❌ Eliminar archivo", key="delete_file", type="secondary", width="stretch"):
+        if ui_button("❌ Eliminar archivo", key="delete_file", type="secondary"):
             st.session_state.uploaded_file = None
             st.session_state.selected_months = []
-            st.session_state.pending_months_value = []
             st.rerun()
 
 # Botón centrado abajo (depende de ambas columnas)
 col1, col2, col3 = st.columns([3, 1, 3])
 with col2:
-    run_clicked = st.button("▶️ Ejecutar y mostrar", type="primary", width="stretch")
+    run_clicked = ui_button("▶️ Ejecutar y mostrar", type="primary")
 
 
 # ================== Ejecutar y VISUALIZAR ==================
@@ -485,10 +502,8 @@ if st.session_state.uploaded_file and opcion and opcion != "" and run_clicked:
     out_excel.seek(0)
     payload = out_excel.read()
 
-    # Vistas iniciales (setea mes por defecto si aplica)
-    views, _ = build_auto_views(df_input)
-
-    # Guardar en historial
+    # Vistas iniciales (setea mes por defecto si aplica) y guardado en historial
+    views = build_auto_views(df_input)
     nombre_reporte = f"reporte_general_{datetime.today().strftime('%Y-%m-%d')}.xlsx"
     st.session_state.history.insert(0, {
         "filename": nombre_reporte,
@@ -514,68 +529,61 @@ else:
         sel = st.selectbox("Reporte", options=list(range(len(labels))), format_func=lambda i: labels[i], label_visibility="collapsed")
     with col_h2:
         c_dl, c_clr = st.columns(2)
-        current = st.session_state.history[sel]
+        current = st.session_state.history[sel]   # <<<<<< define current acá
         with c_dl:
-            st.download_button(
-                label="📥 Descargar Excel",
+            ui_download_button(
+                "📥 Descargar Excel",
                 data=current["payload"],
                 file_name=current["filename"],
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key=f"download_history_{sel}",
-                width="stretch",
             )
         with c_clr:
-            if st.button("🧹 Limpiar historial", width="stretch"):
+            if ui_button("🧹 Limpiar historial"):
                 st.session_state.history = []
                 st.session_state.selected_months = []
-                st.session_state.pending_months_value = []
                 st.rerun()
 
-# ======= Filtro de meses =======
-st.markdown("##### 🗓️ Filtro de meses")
-df_for_filter = current["df_raw"]
-meses_disponibles = _available_months(df_for_filter)
+    # ======= Filtro de meses =======
+    st.markdown("##### 🗓️ Filtro de meses")
+    df_for_filter = current["df_raw"]
+    meses_disponibles = _available_months(df_for_filter)
 
-# Bootstrap: si no hay selección previa, por defecto el último mes (si existe)
-if not st.session_state.get("selected_months"):
-    st.session_state["selected_months"] = [meses_disponibles[-1]] if meses_disponibles else []
+    # Bootstrap: si no hay selección previa, por defecto el último mes (si existe)
+    if not st.session_state.get("selected_months"):
+        st.session_state["selected_months"] = [meses_disponibles[-1]] if meses_disponibles else []
 
-with st.form("months_form", clear_on_submit=False):
-    # NO usamos key. Tomamos el default desde session_state y luego usamos el valor devuelto por el widget.
-    sel = st.multiselect(
-        "Seleccioná uno o más meses",
-        options=meses_disponibles,
-        default=st.session_state["selected_months"],
-    )
+    with st.form("months_form", clear_on_submit=False):
+        # NO usamos key. Tomamos el default desde session_state y luego usamos el valor devuelto por el widget.
+        sel_months = st.multiselect(
+            "Seleccioná uno o más meses",
+            options=meses_disponibles,
+            default=st.session_state["selected_months"],
+        )
 
-    col_f1, col_f2, col_f3, col_f4 = st.columns([1, 1, 1, 1])
-    apply_btn  = col_f1.form_submit_button("✅ Aplicar meses")
-    ultimo_btn = col_f2.form_submit_button("📅 Último mes")
-    clear_btn  = col_f3.form_submit_button("🗑️ Limpiar selección")
-    all_btn    = col_f4.form_submit_button("📆 Todos los meses")
+        col_f1, col_f2, col_f3, col_f4 = st.columns([1, 1, 1, 1])
+        apply_btn  = col_f1.form_submit_button("✅ Aplicar meses")
+        ultimo_btn = col_f2.form_submit_button("📅 Último mes")
+        clear_btn  = col_f3.form_submit_button("🗑️ Limpiar selección")
+        all_btn    = col_f4.form_submit_button("📆 Todos los meses")
 
-# Acciones del form (prioridad: limpiar > último > todos > aplicar)
-if clear_btn:
-    st.session_state["selected_months"] = []
-    st.rerun()
-elif ultimo_btn:
-    last = [meses_disponibles[-1]] if meses_disponibles else []
-    st.session_state["selected_months"] = last
-    st.rerun()
-elif all_btn:
-    st.session_state["selected_months"] = meses_disponibles.copy()
-    st.rerun()
-elif apply_btn:
-    st.session_state["selected_months"] = sel
+    # Acciones del form (prioridad: limpiar > último > todos > aplicar)
+    if clear_btn:
+        st.session_state["selected_months"] = []
+        st.rerun()
+    elif ultimo_btn:
+        last = [meses_disponibles[-1]] if meses_disponibles else []
+        st.session_state["selected_months"] = last
+        st.rerun()
+    elif all_btn:
+        st.session_state["selected_months"] = meses_disponibles.copy()
+        st.rerun()
+    elif apply_btn:
+        st.session_state["selected_months"] = sel_months
 
-st.divider()
+    st.divider()
 
-# === Reconstruir vistas con el filtro actual (ojo: FUERA del form y FUERA de los if/elif) ===
-views_filtered, _ = build_auto_views(df_for_filter)
-
-st.markdown("### 📊 Visualización")
-render_views(views_filtered)
-
-
-
-    
+    # === Reconstruir vistas con el filtro actual (fuera del form y de los if/elif) ===
+    views_filtered = build_auto_views(df_for_filter)
+    st.markdown("### 📊 Visualización")
+    render_views(views_filtered)

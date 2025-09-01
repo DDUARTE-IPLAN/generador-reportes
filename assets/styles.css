@@ -54,3 +54,70 @@ html, body, .stApp {
   border-radius: 0.75rem;
   padding: 0.9rem 1rem;
 }
+
+/* ===== Topbar fija y limpia ===== */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: #ffffffcc;               /* leve transparencia */
+  backdrop-filter: blur(6px);
+}
+
+.topbar-inner {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 0.75rem 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.topbar-logo {
+  width: 128px;       /* antes 44px */
+  height: 128px;      /* antes 44px */
+  object-fit: contain;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+  background: #fff;
+  padding: 4px;      /* le da un poco de “aire” */
+}
+
+.topbar-title .title {
+  font-weight: 700;
+  font-size: 1.15rem;
+  line-height: 1.2;
+  color: #0f172a;
+}
+.topbar-title .subtitle {
+  font-size: 0.9rem;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+.topbar-right { /* reservado para acciones futuras */ }
+
+.topbar-divider {
+  height: 1px;
+  background: linear-gradient(90deg, #e2e8f0, #cbd5e1, #e2e8f0);
+}
+
+/* Asegurar ancho cómodo del contenido principal */
+.block-container {
+  max-width: 980px;
+}
+
+/* Tarjeta de éxito que ya usábamos */
+.success-card {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: 0.75rem;
+  padding: 0.9rem 1rem;
+}

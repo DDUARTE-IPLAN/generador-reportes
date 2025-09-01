@@ -531,50 +531,51 @@ else:
                 st.session_state.pending_months_value = []
                 st.rerun()
 
-    # ======= Filtro de meses =======
-    st.markdown("##### 🗓️ Filtro de meses")
-    df_for_filter = current["df_raw"]
-    meses_disponibles = _available_months(df_for_filter)
+# ======= Filtro de meses =======
+st.markdown("##### 🗓️ Filtro de meses")
+df_for_filter = current["df_raw"]
+meses_disponibles = _available_months(df_for_filter)
 
-    # --- Si hay valor pendiente, o si aún no existe el key, sembrar el estado ANTES de crear el widget
-    if st.session_state.pending_months_value is not None:
-        st.session_state["months_multiselect"] = st.session_state.pending_months_value
-        st.session_state.pending_months_value = None
-    elif "months_multiselect" not in st.session_state:
-        st.session_state["months_multiselect"] = st.session_state.selected_months
+# Bootstrap: si no hay selección previa, por defecto el último mes (si existe)
+if not st.session_state.get("selected_months"):
+    if meses_disponibles:
+        st.session_state["selected_months"] = [meses_disponibles[-1]]
+    else:
+        st.session_state["selected_months"] = []
 
-    with st.form("months_form", clear_on_submit=False):
-        # IMPORTANTE: sin 'default' para evitar el warning.
-        _ = st.multiselect(
-            "Seleccioná uno o más meses",
-            options=meses_disponibles,
-            key="months_multiselect",
-        )
-        # 4 botones: aplicar, último, limpiar, todos
-        col_f1, col_f2, col_f3, col_f4 = st.columns([1, 1, 1, 1])
-        apply_btn  = col_f1.form_submit_button("✅ Aplicar meses")
-        ultimo_btn = col_f2.form_submit_button("📅 Último mes")
-        clear_btn  = col_f3.form_submit_button("🗑️ Limpiar selección")
-        all_btn    = col_f4.form_submit_button("📆 Todos los meses")
+with st.form("months_form", clear_on_submit=False):
+    # NO usamos key. Tomamos el default desde session_state y luego usamos el valor devuelto por el widget.
+    sel = st.multiselect(
+        "Seleccioná uno o más meses",
+        options=meses_disponibles,
+        default=st.session_state["selected_months"],
+    )
 
-    # Acciones del form (prioridad: limpiar > último > todos > aplicar)
-    if clear_btn:
-        st.session_state.selected_months = []
-        st.session_state["months_multiselect"] = []
-        st.rerun()
-    elif ultimo_btn:
-        last = [meses_disponibles[-1]] if meses_disponibles else []
-        st.session_state.selected_months = last
-        st.session_state["months_multiselect"] = last
-        st.rerun()
-    elif all_btn:
-        st.session_state.selected_months = meses_disponibles.copy()
-        st.session_state["months_multiselect"] = meses_disponibles.copy()
-        st.rerun()
-    elif apply_btn:
-        st.session_state.selected_months = st.session_state.get("months_multiselect", [])
+    col_f1, col_f2, col_f3, col_f4 = st.columns([1, 1, 1, 1])
+    apply_btn  = col_f1.form_submit_button("✅ Aplicar meses")
+    ultimo_btn = col_f2.form_submit_button("📅 Último mes")
+    clear_btn  = col_f3.form_submit_button("🗑️ Limpiar selección")
+    all_btn    = col_f4.form_submit_button("📆 Todos los meses")
 
-    st.divider()
+# Acciones del form (prioridad: limpiar > último > todos > aplicar)
+if clear_btn:
+    st.session_state["selected_months"] = []
+    st.rerun()
+
+elif ultimo_btn:
+    last = [meses_disponibles[-1]] if meses_disponibles else []
+    st.session_state["selected_months"] = last
+    st.rerun()
+
+elif all_btn:
+    st.session_state["selected_months"] = meses_disponibles.copy()
+    st.rerun()
+
+elif apply_btn:
+    st.session_state["selected_months"] = sel
+
+st.divider()
+
 
     # Re-construir vistas con el filtro actual
     views_filtered, _ = build_auto_views(df_for_filter)

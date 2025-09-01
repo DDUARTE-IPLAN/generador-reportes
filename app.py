@@ -538,10 +538,7 @@ meses_disponibles = _available_months(df_for_filter)
 
 # Bootstrap: si no hay selección previa, por defecto el último mes (si existe)
 if not st.session_state.get("selected_months"):
-    if meses_disponibles:
-        st.session_state["selected_months"] = [meses_disponibles[-1]]
-    else:
-        st.session_state["selected_months"] = []
+    st.session_state["selected_months"] = [meses_disponibles[-1]] if meses_disponibles else []
 
 with st.form("months_form", clear_on_submit=False):
     # NO usamos key. Tomamos el default desde session_state y luego usamos el valor devuelto por el widget.
@@ -561,24 +558,24 @@ with st.form("months_form", clear_on_submit=False):
 if clear_btn:
     st.session_state["selected_months"] = []
     st.rerun()
-
 elif ultimo_btn:
     last = [meses_disponibles[-1]] if meses_disponibles else []
     st.session_state["selected_months"] = last
     st.rerun()
-
 elif all_btn:
     st.session_state["selected_months"] = meses_disponibles.copy()
     st.rerun()
-
 elif apply_btn:
     st.session_state["selected_months"] = sel
 
 st.divider()
 
+# === Reconstruir vistas con el filtro actual (ojo: FUERA del form y FUERA de los if/elif) ===
+views_filtered, _ = build_auto_views(df_for_filter)
 
-    # Re-construir vistas con el filtro actual
-    views_filtered, _ = build_auto_views(df_for_filter)
+st.markdown("### 📊 Visualización")
+render_views(views_filtered)
 
-    st.markdown("### 📊 Visualización")
-    render_views(views_filtered)
+
+
+    

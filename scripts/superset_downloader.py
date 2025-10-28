@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import re
 import time
+import os
 from datetime import datetime
-from pathlib import Path
 from typing import Callable, List, Optional
+import pathlib
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, expect
 
@@ -17,7 +18,7 @@ def _log(log: Optional[Callable[[str], None]], msg: str) -> None:
     (log or print)(msg)
 
 
-def _ensure_dir(p: Path) -> None:
+def _ensure_dir(p: pathlib.Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
@@ -38,7 +39,7 @@ def _wait_idle(page, timeout_ms: int = 15000) -> None:
         pass
 
 
-def _name_with_stamp(suggested: str, dest_dir: Path) -> Path:
+def _name_with_stamp(suggested: str, dest_dir: pathlib.Path) -> pathlib.Path:
     base = suggested.rsplit(".", 1)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     if len(base) == 2:
@@ -190,8 +191,10 @@ _CSV_PATTERNS = [
 # =========================================================
 # Descarga desde DASHBOARD
 # =========================================================
-def _download_from_dashboard(page, url: str, dest: Path, title_filter_regex: str,
-                             max_panels: int, timeout_per_panel: int, log) -> List[Path]:
+def _download_from_dashboard(
+    page, url: str, dest: pathlib.Path, title_filter_regex: str,
+    max_panels: int, timeout_per_panel: int, log
+) -> List[pathlib.Path]:
     _log(log, "📊 Detecté enlace de Dashboard. Cargando…")
     page.goto(url, wait_until="domcontentloaded")
     _wait_idle(page, 60000)
@@ -222,7 +225,7 @@ def _download_from_dashboard(page, url: str, dest: Path, title_filter_regex: str
             pass
         return []
 
-    results: List[Path] = []
+    results: List[pathlib.Path] = []
     descargados = 0
 
     title_regex = None
@@ -293,7 +296,9 @@ def _download_from_dashboard(page, url: str, dest: Path, title_filter_regex: str
 # =========================================================
 # Descarga desde EXPLORE (gráfico individual)
 # =========================================================
-def _download_from_explore(page, url: str, dest: Path, timeout_per_panel: int, log) -> List[Path]:
+def _download_from_explore(
+    page, url: str, dest: pathlib.Path, timeout_per_panel: int, log
+) -> List[pathlib.Path]:
     _log(log, "📈 Detecté enlace de Explore. Cargando…")
     page.goto(url, wait_until="domcontentloaded")
     _wait_idle(page, 15000)
@@ -372,7 +377,7 @@ def _download_from_explore(page, url: str, dest: Path, timeout_per_panel: int, l
 # =========================================================
 def download_superset_csvs(
     dashboard_url: str,
-    download_dir: Path | str,
+    download_dir: pathlib.Path | str,
     keycloak_user: str = "",
     keycloak_pass: str = "",
     title_filter_regex: str = "",
@@ -380,14 +385,14 @@ def download_superset_csvs(
     panel_timeout: int = 25,
     headless: bool = False,
     log: Callable[[str], None] | None = None,
-) -> List[Path]:
+) -> List[pathlib.Path]:
     """
     Descarga CSVs desde:
       • Dashboard (varios charts)
       • Explore (un chart)
     Devuelve la lista de archivos guardados.
     """
-    dest = Path(download_dir).resolve()
+    dest = pathlib.Path(download_dir).expanduser().resolve()
     _ensure_dir(dest)
 
     target_url = dashboard_url.strip()
@@ -395,7 +400,22 @@ def download_superset_csvs(
     _log(log, f"Destino: {dest}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        def _running_in_docker() -> bool:
+            # Sin $DISPLAY o presencia de /.dockerenv
+            return (not os.environ.get("DISPLAY")) or pathlib.Path("/.dockerenv").exists()
+
+        # Forzar headless si estamos en server / docker, o si la env var lo pide
+        force_headless = _running_in_docker() or os.getenv("PLAYWRIGHT_HEADLESS", "0") in ("1", "true", "True")
+        run_headless = True if force_headless else bool(headless)
+
+        launch_args = ["--no-sandbox", "--disable-dev-shm-usage"]
+
+        try:
+            browser = p.chromium.launch(headless=run_headless, args=launch_args)
+        except Exception:
+            # por si alguien pasa headless=False y igual falla en server
+            browser = p.chromium.launch(headless=True, args=launch_args)
+
         context = browser.new_context(accept_downloads=True, permissions=["notifications"])
         page = context.new_page()
         page.set_viewport_size({"width": 1366, "height": 900})
@@ -431,7 +451,7 @@ def download_superset_csvs(
 
         # 4) Detectar de nuevo con la URL real en pantalla y descargar
         final_url = page.url
-        files: List[Path] = []
+        files: List[pathlib.Path] = []
         try:
             if _is_dashboard_url(final_url):
                 _log(log, "")

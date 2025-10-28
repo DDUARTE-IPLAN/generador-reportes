@@ -1,6 +1,31 @@
 import pandas as pd
 
-def procesar_reporte_general(df, output):
+# ---------------- Utilidades de fechas (robustas a múltiples formatos) ----------------
+def _parse_mixed_datetime(series: pd.Series) -> pd.Series:
+    """
+    Intenta parsear fechas en varios formatos sin ambigüedad:
+      1) ISO con hora:  YYYY-MM-DD HH:MM:SS
+      2) ISO sin hora:  YYYY-MM-DD
+      3) Formatos día/mes: DD-MM-YY/AAAA o DD/MM/YY/AAAA (dayfirst=True)
+    Retorna datetime64[ns] (NaT donde no se pudo).
+    """
+    s = pd.to_datetime(series, format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    mask = s.isna()
+    if mask.any():
+        s.loc[mask] = pd.to_datetime(series[mask], format="%Y-%m-%d", errors="coerce")
+    mask = s.isna()
+    if mask.any():
+        # Último intento tolerante para entradas tipo DD-MM-AAAA, DD/MM/AA, etc.
+        s.loc[mask] = pd.to_datetime(series[mask], dayfirst=True, errors="coerce")
+    return s
+
+def _dt_to_ddmmaa_text(s: pd.Series) -> pd.Series:
+    """Convierte datetime a texto DD-MM-AA; NaT -> cadena vacía."""
+    out = s.dt.strftime("%d-%m-%y")
+    return out.where(~s.isna(), "")
+
+
+def procesar_reporte_general(df: pd.DataFrame, output):
     # ---------------- Renombrar columnas ----------------
     df.columns = [col.strip() for col in df.columns]
     df = df.rename(columns={
@@ -24,41 +49,46 @@ def procesar_reporte_general(df, output):
         "Fecha Agendamiento", "Motivo Reprogramación", "Motivo", "Segmento",
         "Fecha Cancelación", "Current Phase",
     ]
-    df = df.drop(columns=[c for c in columnas_a_eliminar if c in df.columns])
+    df = df.drop(columns=[c for c in columnas_a_eliminar if c in df.columns], errors="ignore")
 
-    # ---------------- Parseo de fechas para cálculos ----------------
+    # ---------------- Parseo de fechas sin ambigüedad ----------------
     if "FECHA DE ACTIVACION" in df.columns:
-        df["FECHA DE ACTIVACION"] = pd.to_datetime(df["FECHA DE ACTIVACION"], errors="coerce")
+        df["FECHA DE ACTIVACION"] = _parse_mixed_datetime(df["FECHA DE ACTIVACION"])
     if "FECHA DE CREACION" in df.columns:
-        df["FECHA DE CREACION"] = pd.to_datetime(df["FECHA DE CREACION"], errors="coerce")
+        df["FECHA DE CREACION"] = _parse_mixed_datetime(df["FECHA DE CREACION"])
 
     # ---------------- Días abierta ----------------
     hoy = pd.Timestamp.today().normalize()
     if "FECHA DE CREACION" in df.columns:
-        df["DIAS ABIERTA"] = (hoy - df["FECHA DE CREACION"]).dt.days
+        fc = pd.to_datetime(df["FECHA DE CREACION"], errors="coerce")
+        df["DIAS ABIERTA"] = (hoy - fc).dt.days
     else:
         df["DIAS ABIERTA"] = pd.NA
 
     # ---------------- Eliminar duplicados ----------------
+    # Clave compuesta (según tu preferencia): SUSCRIPCION + INTERACCION (si existe)
     if "INTERACCION" in df.columns:
         df = df.drop_duplicates(subset=["SUSCRIPCION", "INTERACCION"])
     else:
         df = df.drop_duplicates(subset=["SUSCRIPCION"])
 
     # ---------------- Separar hojas ----------------
-    df_abiertas = df[df["ESTADO"] != "Completed"]
+    # Abiertas: todo lo que no está "Completed"
+    df_abiertas = df[df.get("ESTADO", "") != "Completed"].copy()
 
+    # Top 20 + Abiertas: InProgress y no Deactivation, ordenadas por días abiertas
     df_top_20_abiertas = df_abiertas[
-        (df_abiertas["ESTADO"] == "InProgress") &
-        (df_abiertas["CATEGORIA"] != "Deactivation")
+        (df_abiertas.get("ESTADO", "") == "InProgress") &
+        (df_abiertas.get("CATEGORIA", "") != "Deactivation")
     ].sort_values(by="DIAS ABIERTA", ascending=False).head(20).copy()
 
     if "FECHA DE ACTIVACION" in df_top_20_abiertas.columns:
         df_top_20_abiertas = df_top_20_abiertas.drop(columns=["FECHA DE ACTIVACION"])
 
+    # Bajas no completadas
     df_bajas = df[
-        (df["CATEGORIA"] == "Deactivation") &
-        (df["ESTADO"] != "Completed")
+        (df.get("CATEGORIA", "") == "Deactivation") &
+        (df.get("ESTADO", "") != "Completed")
     ].copy()
 
     columnas_bajas = [
@@ -69,61 +99,68 @@ def procesar_reporte_general(df, output):
         by="DIAS ABIERTA", ascending=False
     )
 
+    # Activaciones (completadas y SalesOrder)
     df_activaciones = df[
-        (df["ESTADO"] == "Completed") &
-        (df["CATEGORIA"] == "SalesOrder")
+        (df.get("ESTADO", "") == "Completed") &
+        (df.get("CATEGORIA", "") == "SalesOrder")
     ].copy()
 
-    # ---------------- MES en español (para hoja "ACTIVACIONES POR MODELO") ----------------
-    meses_es = {
-        "January": "ENERO", "February": "FEBRERO", "March": "MARZO",
-        "April": "ABRIL", "May": "MAYO", "June": "JUNIO",
-        "July": "JULIO", "August": "AGOSTO", "September": "SEPTIEMBRE",
-        "October": "OCTUBRE", "November": "NOVIEMBRE", "December": "DICIEMBRE",
-    }
+    # ---------------- MES en español (para "ACTIVACIONES POR MODELO") ----------------
+    # Evitamos depender de nombres en inglés; usamos el número de mes.
+    meses_es = ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
+                "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"]
 
     if "FECHA DE CREACION" in df_activaciones.columns:
-        df_activaciones["FECHA DE CREACION"] = pd.to_datetime(df_activaciones["FECHA DE CREACION"], errors="coerce")
-        df_activaciones["MES"] = df_activaciones["FECHA DE CREACION"].dt.strftime("%B %Y")
-        df_activaciones["MES"] = df_activaciones["MES"].apply(
-            lambda x: f'{meses_es.get(x.split()[0], x.split()[0])} {x.split()[1]}' if isinstance(x, str) else x
-        )
+        fcrea = pd.to_datetime(df_activaciones["FECHA DE CREACION"], errors="coerce")
+        df_activaciones["__YEAR"] = fcrea.dt.year
+        df_activaciones["__MONTH"] = fcrea.dt.month
+        df_activaciones["MES"] = (
+            df_activaciones["__MONTH"].apply(lambda m: meses_es[m - 1] if pd.notna(m) and m >= 1 and m <= 12 else "")
+            + " "
+            + df_activaciones["__YEAR"].astype("Int64").astype(str)
+        ).where(~fcrea.isna(), pd.NA)
     else:
         df_activaciones["MES"] = pd.NA
 
-    meses = df_activaciones["MES"].dropna().unique()
-    meses = sorted(
-        meses,
-        key=lambda x: pd.to_datetime(
-            x.replace("ENERO", "January").replace("FEBRERO", "February").replace("MARZO", "March")
-             .replace("ABRIL", "April").replace("MAYO", "May").replace("JUNIO", "June")
-             .replace("JULIO", "July").replace("AGOSTO", "August").replace("SEPTIEMBRE", "September")
-             .replace("OCTUBRE", "October").replace("NOVIEMBRE", "November").replace("DICIEMBRE", "December"),
-            format="%B %Y", errors="coerce",
-        ),
-        reverse=True,
-    )
+    # Lista de meses ordenada (YYYY-MM desc)
+    if "FECHA DE CREACION" in df_activaciones.columns:
+        fcrea = pd.to_datetime(df_activaciones["FECHA DE CREACION"], errors="coerce")
+        orden_mes = fcrea.dt.to_period("M").astype("period[M]")
+        df_activaciones["__ORDEN_MES"] = orden_mes
+        meses = (
+            df_activaciones.loc[~df_activaciones["MES"].isna(), ["MES", "__ORDEN_MES"]]
+            .drop_duplicates()
+            .sort_values("__ORDEN_MES", ascending=False)["MES"]
+            .tolist()
+        )
+    else:
+        meses = []
 
-    df_activadas = df[df["ESTADO"] == "Completed"].copy()
+    # Órdenes completadas (para hoja "ORDENES ACTIVADAS")
+    df_activadas = df[df.get("ESTADO", "") == "Completed"].copy()
 
     # ---------------- Exportar a Excel (fechas como TEXTO "DD-MM-AA") ----------------
-    DATE_FMT = "%d-%m-%y"
-
     def df_fechas_a_texto(df_src: pd.DataFrame) -> pd.DataFrame:
-        """Devuelve una copia con columnas 'FECHA*' convertidas a string DD-MM-AA (Excel no las reinterpreta)."""
+        """
+        Devuelve una copia con columnas 'FECHA*' convertidas a texto DD-MM-AA.
+        No usa dayfirst=True para parseo principal; asume que ya están en datetime
+        y sólo cae a un parseo laxo si hubiera strings colados.
+        """
         df_out = df_src.copy()
         for col in df_out.columns:
             if "FECHA" in col.upper():
-                s = pd.to_datetime(df_out[col], errors="coerce")
-                txt = s.dt.strftime(DATE_FMT)
-                txt = txt.where(~s.isna(), "")
-                df_out[col] = txt.astype(object)   # asegura que pandas escriba como texto
+                # Si ya es datetime -> formateo directo; si no, intento parseo tolerante
+                if pd.api.types.is_datetime64_any_dtype(df_out[col]):
+                    s = df_out[col]
+                else:
+                    s = _parse_mixed_datetime(df_out[col])
+                df_out[col] = _dt_to_ddmmaa_text(s).astype(object)  # escribir como texto
         return df_out
 
     with pd.ExcelWriter(
         output,
         engine="xlsxwriter",
-        engine_kwargs={"options": {"strings_to_numbers": False}},  # evita auto-conversión
+        engine_kwargs={"options": {"strings_to_numbers": False}},  # evita auto-conversión a número
     ) as writer:
 
         def export_and_autofit(df_export: pd.DataFrame, sheet_name: str):
@@ -137,6 +174,7 @@ def procesar_reporte_general(df, output):
                     maxlen = len(col)
                 ws.set_column(i, i, max(maxlen, len(col)) + 4)
 
+        # Hojas principales
         export_and_autofit(df, "TODAS LAS ORDENES")
         export_and_autofit(df_abiertas, "ORDENES ABIERTAS")
         export_and_autofit(df_top_20_abiertas, "TOP 20 + ABIERTAS")
@@ -150,9 +188,12 @@ def procesar_reporte_general(df, output):
 
         startrow = 0
         for mes in meses:
-            bloque = df_activaciones[df_activaciones["MES"] == mes]
+            bloque = df_activaciones[df_activaciones["MES"] == mes].copy()
+
+            # Asegurar fechas como texto en el bloque exportado
             bloque_txt = df_fechas_a_texto(bloque)
 
+            # Pivot por OFERTA x MODELO COMERCIAL (conteo de SUSCRIPCION)
             tabla_mes = pd.pivot_table(
                 bloque_txt,
                 index="OFERTA",
@@ -164,12 +205,23 @@ def procesar_reporte_general(df, output):
                 margins_name="Suma total",
             )
 
+            # Título del bloque
             worksheet.write(startrow, 0, mes)
-            tabla_mes.reset_index().to_excel(
-                writer, sheet_name="ACTIVACIONES POR MODELO", startrow=startrow + 1, index=False
+
+            # Escribir la tabla
+            tabla_mes_reset = tabla_mes.reset_index()
+            tabla_mes_reset.to_excel(
+                writer,
+                sheet_name="ACTIVACIONES POR MODELO",
+                startrow=startrow + 1,
+                index=False
             )
-            startrow += len(tabla_mes) + 4
+
+            # Ajustes de ancho
             worksheet.set_column(0, 0, 48)
             worksheet.set_column(1, 10, 13)
+
+            # Avanzar fila para siguiente bloque (+4 de separación)
+            startrow += len(tabla_mes_reset) + 4
 
     output.seek(0)

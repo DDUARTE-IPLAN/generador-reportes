@@ -1,589 +1,518 @@
-import io
-import base64
-import re
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+# =========================================================
+# FIX para Python 3.13 + Windows (Playwright / Streamlit)
+# =========================================================
+# Evita "NotImplementedError" al crear subprocesos en Windows.
+import sys, asyncio
+if sys.platform.startswith("win"):
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        print("[INFO] Usando WindowsProactorEventLoopPolicy para asyncio (compatible con Playwright).")
+    except Exception as e:
+        print(f"[WARN] No pude cambiar event loop policy: {e}")
+# =========================================================
+# FIN FIX asyncio
+# =========================================================
+from scripts.ui_panels import (
+    render_tab_todas_ordenes,
+    render_tab_nubes_terceros,
+    render_tab_bajas,
+)
 
+
+
+import os
+import re
 import numpy as np
+from io import BytesIO
+from datetime import datetime, date
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 
-# Gráficos (Plotly opcional)
-try:
-    import plotly.express as px
-    HAS_PLOTLY = True
-except Exception:
-    HAS_PLOTLY = False
-
+# Importa tu script de generación y el downloader de Superset
 from scripts.reporte_general import procesar_reporte_general
-from scripts.script2 import procesar_script2
+from scripts.superset_downloader import download_superset_csvs
 
 
-# ================== Config básica ==================
-st.set_page_config(
-    page_title="Generador de Reportes Automático",
-    page_icon="📊",
-    layout="wide",
-)
 
-# ====== CSS compacto (reduce márgenes / paddings) ======
-COMPACT_CSS = """
-<style>
-.block-container { padding-top: 1.4rem; padding-bottom: 0.8rem; }
-section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
-.block-container > div:first-child { margin-top: .25rem; }
-div[data-testid="stVerticalBlock"] > div:has(> .stMarkdown) { margin: .2rem 0; }
-.stButton > button, .stDownloadButton > button { padding: .45rem .9rem; }
-.stSelectbox, .stFileUploader, .stMultiSelect { margin-bottom: .4rem; }
-div[data-baseweb="select"] > div { min-height: 38px; }
+def _estilos_tabs():
+    st.markdown("""
+    <style>
+    /* CONTENEDOR DE TABS */
+    section[data-testid="stTabs"] [data-baseweb="tab-list"]{
+        gap: 2.4rem !important;           /* separa los tabs */
+    }
 
-/* topbar visual */
-.topbar { margin-top: .2rem; margin-bottom: .25rem; }
-.topbar-inner{ display:flex; align-items:center; justify-content:space-between; }
-.topbar-left{ display:flex; align-items:center; gap:.6rem;}
-.topbar-logo{ height:28px; }
-.title{ font-weight:600; font-size:1.05rem; line-height:1.2; }
-.subtitle{ color:#6b7280; font-size:.85rem; }
-.topbar-divider{ height:1px; background:#e5e7eb; margin:.4rem 0 .6rem; }
-.badge{ display:inline-flex; align-items:center; gap:.35rem; background:#f3f4f6; border:1px solid #e5e7eb; border-radius:999px; padding:.15rem .6rem; font-size:.8rem; color:#374151;}
-</style>
-"""
-st.markdown(COMPACT_CSS, unsafe_allow_html=True)
+    /* BOTÓN DEL TAB (wrapper) */
+    section[data-testid="stTabs"] button[role="tab"]{
+        padding: 14px 22px !important;    /* área clickeable */
+        border-radius: 10px !important;
+    }
 
-# ================== Helpers de compatibilidad width ==================
-def ui_dataframe(df: pd.DataFrame):
-    """Compat: width='stretch' si está disponible; sino use_container_width=True."""
+    /* TEXTO DEL TAB */
+    section[data-testid="stTabs"] button[role="tab"] p{
+        font-size: 1.6rem !important;     /* ▲ más grande */
+        line-height: 1.5 !important;
+        font-weight: 800 !important;      /* bien negrita */
+        color: #0f172a !important;
+        margin: 0 !important;
+        color: #0f172a;
+    }
+
+    /* TAB ACTIVO (texto y botón) */
+    section[data-testid="stTabs"] button[role="tab"][aria-selected="true"] p{
+        color: #791a5a !important;        /* violeta marca */
+    }
+
+    /* SUBRAYADO DEL TAB ACTIVO */
+    section[data-testid="stTabs"] [data-baseweb="tab-highlight"]{
+        height: 4px !important;
+        background: #791a5a !important;
+        border-radius: 3px !important;
+    }
+
+    /* fallback para versiones antiguas (estructura distinta) */
+    div.stTabs [data-baseweb="tab"] p{
+        font-size: 1.6rem !important;
+        font-weight: 800 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+
+
+
+# =========================
+# CONFIGURACIÓN BÁSICA
+# =========================
+st.set_page_config(page_title="Generador de reportes automático", layout="wide")
+os.makedirs("outputs", exist_ok=True)
+
+# Estado para logs/descargas de Superset
+if "superset_logs" not in st.session_state:
+    st.session_state.superset_logs = []
+if "superset_results" not in st.session_state:
+    st.session_state.superset_results = []
+if "usar_descargados" not in st.session_state:
+    st.session_state.usar_descargados = False
+if "csvs_seleccionados" not in st.session_state:
+    st.session_state.csvs_seleccionados = []
+
+
+# =========================
+# FUNCIONES AUXILIARES
+# =========================
+def nombre_salida() -> str:
+    """Nombre de archivo con la fecha actual."""
+    return f"reporte_general_{datetime.now().strftime('%d-%m-%Y')}.xlsx"
+
+
+def leer_fuente(archivo) -> pd.DataFrame:
+    """Lee CSV o Excel detectando separador automáticamente (CSV) y usando openpyxl para XLSX."""
+    nombre = (archivo.name if hasattr(archivo, "name") else str(archivo)).lower()
+    if nombre.endswith(".csv"):
+        try:
+            return pd.read_csv(archivo, sep=None, engine="python")
+        except Exception:
+            # fallback por separadores comunes
+            try_order = [",", ";", "\t", "|"]
+            for s in try_order:
+                try:
+                    if hasattr(archivo, "seek"):
+                        archivo.seek(0)
+                    return pd.read_csv(archivo, sep=s, engine="c", low_memory=False)
+                except Exception:
+                    continue
+            raise
+    return pd.read_excel(archivo, engine="openpyxl")
+
+
+def leer_fuentes_csv_multiples(rutas: list[str]) -> pd.DataFrame:
+    """
+    Lee varios CSVs y concatena por columnas (outer join de columnas).
+    Intenta detectar separador; agrega columna __ORIGEN con el nombre del archivo.
+    """
+    frames = []
+    for ruta in rutas:
+        try:
+            # Detección rápida de separador
+            try:
+                df = pd.read_csv(ruta, sep=None, engine="python", low_memory=False)
+            except Exception:
+                ok = False
+                for s in [",", ";", "\t", "|"]:
+                    try:
+                        df = pd.read_csv(ruta, sep=s, engine="c", low_memory=False)
+                        ok = True
+                        break
+                    except Exception:
+                        continue
+                if not ok:
+                    raise
+            df["__ORIGEN"] = Path(ruta).name
+            frames.append(df)
+        except Exception as e:
+            st.warning(f"No pude leer {ruta}: {e}")
+    if not frames:
+        raise RuntimeError("No se pudo leer ninguno de los CSV seleccionados.")
+    # Concat robusto (alineación de columnas)
+    df_final = pd.concat(frames, axis=0, ignore_index=True, sort=False)
+    return df_final
+
+
+def cargar_hoja_todas_las_ordenes() -> tuple[pd.DataFrame | None, str]:
+    """Carga la hoja 'TODAS LAS ORDENES' del Excel más reciente (memoria o disco) y limpia auxiliares heredadas."""
+    bytes_guardados = st.session_state.get("excel_bytes")
+    nombre_guardado = st.session_state.get("excel_name")
+    if bytes_guardados:
+        try:
+            xls = pd.ExcelFile(BytesIO(bytes_guardados), engine="openpyxl")
+            hoja = "TODAS LAS ORDENES" if "TODAS LAS ORDENES" in xls.sheet_names else xls.sheet_names[0]
+            df = pd.read_excel(xls, sheet_name=hoja, engine="openpyxl")
+            aux_cols = [c for c in df.columns if c.startswith("_FECHA_") or c.endswith("_DISPLAY")]
+            df = df.drop(columns=aux_cols, errors="ignore")
+            return df, f"{nombre_guardado} (memoria)"
+        except Exception as e:
+            return None, f"No pude leer desde memoria: {e}"
+
     try:
-        return st.dataframe(df, width="stretch")
-    except TypeError:
-        return st.dataframe(df, use_container_width=True)
+        ruta_default = os.path.join("outputs", nombre_salida())
+        if os.path.exists(ruta_default):
+            xls = pd.ExcelFile(ruta_default, engine="openpyxl")
+            hoja = "TODAS LAS ORDENES" if "TODAS LAS ORDENES" in xls.sheet_names else xls.sheet_names[0]
+            df = pd.read_excel(xls, sheet_name=hoja, engine="openpyxl")
+            aux_cols = [c for c in df.columns if c.startswith("_FECHA_") or c.endswith("_DISPLAY")]
+            df = df.drop(columns=aux_cols, errors="ignore")
+            return df, f"{os.path.basename(ruta_default)} (disco)"
+        return None, "No encontré un reporte del día en /outputs."
+    except Exception as e:
+        return None, f"No pude leer desde disco: {e}"
 
-def ui_plotly(fig, *, height: Optional[int] = None):
-    try:
-        return st.plotly_chart(fig, width="stretch", height=height)
-    except TypeError:
-        return st.plotly_chart(fig, use_container_width=True)
 
-def ui_button(label: str, **kwargs):
-    try:
-        return st.button(label, width="stretch", **kwargs)
-    except TypeError:
-        return st.button(label, use_container_width=True, **kwargs)
+def normalizar_estado_series(df: pd.DataFrame) -> pd.Series:
+    """Devuelve una serie de estado en minúsculas ('completed', 'inprogress' o '')."""
+    if "ESTADO" in df.columns:
+        est = df["ESTADO"].astype(str).str.strip().str.lower()
+    elif "Order Status" in df.columns:
+        est = df["Order Status"].astype(str).str.strip().str.lower()
+    else:
+        est = pd.Series([""] * len(df))
+    return est
 
-def ui_download_button(label: str, **kwargs):
-    try:
-        return st.download_button(label, width="stretch", **kwargs)
-    except TypeError:
-        return st.download_button(label, use_container_width=True, **kwargs)
 
-# ================== Logo opcional ==================
-def get_base64_of_bin_file(path: str) -> Optional[str]:
+def contar_estados(df: pd.DataFrame) -> tuple[int, int, int]:
+    """(total, completas, en_progreso)."""
+    est = normalizar_estado_series(df)
+    total = len(df)
+    completas = (est == "completed").sum()
+    en_progreso = (est == "inprogress").sum()
+    return total, int(completas), int(en_progreso)
+
+
+# ------- Parser de fecha con desambiguación por fila -------
+_ddmmaa = re.compile(r"^\s*(\d{1,2})[/-](\d{1,2})[/-](\d{2})\s*$")
+
+
+def _try_make_date(Y: int, m: int, d: int):
     try:
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
-    except Exception:
+        return date(Y, m, d)
+    except ValueError:
         return None
 
-logo_b64 = get_base64_of_bin_file("mi_logo.png")
 
-
-# ================== Estado ==================
-if "uploaded_file" not in st.session_state:
-    st.session_state.uploaded_file = None
-
-if "history" not in st.session_state:
-    # cada item: {"filename","payload","script","when","views","df_raw"}
-    st.session_state.history = []
-
-# Fuente de la verdad del filtro de meses
-if "selected_months" not in st.session_state:
-    st.session_state.selected_months: List[str] = []
-
-MAX_HISTORY = 5
-
-
-# ================== Topbar ==================
-st.markdown(
-    f"""
-    <div class="topbar">
-      <div class="topbar-inner">
-        <div class="topbar-left">
-          {'<img src="data:image/png;base64,' + logo_b64 + '" class="topbar-logo" />' if logo_b64 else ''}
-          <div>
-            <div class="title">Generador de Reportes Automático</div>
-            <div class="subtitle">Panel compacto · Subí CSV, elegí script y corré el reporte</div>
-          </div>
-        </div>
-        <div class="topbar-right">
-          <span class="badge">UI compacta</span>
-        </div>
-      </div>
-      <div class="topbar-divider"></div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ================== Helpers de columnas/meses ==================
-VIS_TABS_ORDER = [
-    "Órdenes por PM",          # 1ª pestaña
-    "Órdenes por oferta",
-    "Estados",
-    "Órdenes por categoría",
-    "Nubes de terceros",       # nueva pestaña
-    "Evolución mensual",
-]
-
-MESES_ES = {
-    1: "ENERO", 2: "FEBRERO", 3: "MARZO", 4: "ABRIL",
-    5: "MAYO", 6: "JUNIO", 7: "JULIO", 8: "AGOSTO",
-    9: "SEPTIEMBRE", 10: "OCTUBRE", 11: "NOVIEMBRE", 12: "DICIEMBRE",
-}
-
-def _col(df: pd.DataFrame, *names: str) -> Optional[str]:
-    """Devuelve el nombre real de la primera columna que matchee alguno de los nombres."""
-    lower_map = {str(c).lower(): c for c in df.columns}
-    for n in names:
-        c = lower_map.get(str(n).lower())
-        if c is not None:
-            return c
-    return None
-
-def _month_label(dt: pd.Timestamp) -> str:
-    if pd.isna(dt):
-        return ""
-    return f"{MESES_ES.get(dt.month, dt.strftime('%B')).upper()} {dt.year}"
-
-def _available_months(df: pd.DataFrame) -> List[str]:
-    col_fcre = _col(df, "FECHA DE CREACION", "Order Creation Date", "order_creation_date")
-    col_fact = _col(df, "FECHA DE ACTIVACION", "Fecha Activación")
-    fecha_col = col_fcre or col_fact
-    if not fecha_col:
-        return []
-    fechas = pd.to_datetime(df[fecha_col], errors="coerce")
-    meses = fechas.dt.to_period("M").dropna().unique()
-    meses_sorted = sorted([pd.Period(m, freq="M") for m in meses])
-    return [_month_label(pd.Timestamp(m.start_time)) for m in meses_sorted]
-
-def _filter_by_months(df: pd.DataFrame, selected: List[str]) -> pd.DataFrame:
-    if not selected:
-        return df
-    col_fcre = _col(df, "FECHA DE CREACION", "Order Creation Date", "order_creation_date")
-    col_fact = _col(df, "FECHA DE ACTIVACION", "Fecha Activación")
-    fecha_col = col_fcre or col_fact
-    if not fecha_col:
-        return df
-    fechas = pd.to_datetime(df[fecha_col], errors="coerce")
-    etiquetas = fechas.apply(_month_label)
-    return df[etiquetas.isin(selected)].copy()
-
-# Patrones de estados (flexibles ES/EN) — grupos NO capturantes para evitar warnings
-RE_IN_PROGRESS = re.compile(r"\b(?:in\s*progres+s?|in\s*progress|en\s*progres?o|en\s*proceso)\b", re.I)
-RE_COMPLETED   = re.compile(r"(?:completad|complete|closed|finaliz)", re.I)
-
-def _normalize_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+def _split_ddmmaa(val, dias_ref: int | None = None):
     """
-    Renombra columnas al español que espera reporte_general.py si vienen con otros nombres.
-    No altera el df original (devuelve una copia).
+    Devuelve (Y, m, d, yy) a partir de un valor de fecha.
+      - datetime -> respetar.
+      - texto 'N-N-YY' o 'N/N/YY': reglas de desambiguación.
+      - último recurso: to_datetime(dayfirst=True)
     """
-    aliases = {
-        "SUSCRIPCION": ["SUSCRIPCION", "Subscription", "subscription"],
-        "INTERACCION": ["INTERACCION", "Interaction", "interaction"],
-        "CATEGORIA": ["CATEGORIA", "Order Category", "order category", "order_category"],
-        "ESTADO": ["ESTADO", "Order Status", "status", "order status"],
-        "OFERTA": ["OFERTA", "Main Offer", "offer", "main offer", "main_offer"],
-        "RESPONSABLE": ["RESPONSABLE", "Responsible", "PM", "Project Manager", "owner", "project manager"],
-        "FECHA DE CREACION": [
-            "FECHA DE CREACION", "Order Creation Date", "order creation date",
-            "order_creation_date", "fecha de creacion", "fecha_creacion"
-        ],
-        "FECHA DE ACTIVACION": [
-            "FECHA DE ACTIVACION", "Fecha Activación", "Activation Date",
-            "activation date", "activation_date", "fecha de activacion", "fecha_activacion"
-        ],
-    }
-    lower_map = {str(c).lower(): c for c in df.columns}
-    colmap = {}
-    for target, names in aliases.items():
-        for n in names:
-            src = lower_map.get(n.lower())
-            if src:
-                colmap[src] = target
-                break
-    return df.rename(columns=colmap).copy()
+    if pd.isna(val):
+        return None, None, None, None
 
-# --- Detección de nube (Huawei/GCP/Azure) ---
-CLOUD_KEYWORDS = {
-    "HUAWEI": r"huawei",
-    "GCP": r"\bgcp\b|google\s*cloud|google\b",
-    "AZURE": r"azure",
-}
-CLOUD_CAND_COLS = [
-    "OFERTA", "CATEGORIA", "PRODUCTO", "PRODUCT", "SERVICE", "SERVICIO",
-    "Main Offer", "Offer", "Producto", "Servicio"
-]
+    if isinstance(val, (pd.Timestamp, datetime)):
+        Y = val.year
+        m = val.month
+        d = val.day
+        return Y, m, d, Y % 100
 
-def _present_text_columns(df: pd.DataFrame) -> List[str]:
-    """Devuelve columnas reales (presentes) a partir de la lista de candidatas."""
-    cols: List[str] = []
-    for c in CLOUD_CAND_COLS:
-        real = _col(df, c)
-        if real and real not in cols:
-            cols.append(real)
-    if not cols:
-        cols = list(df.columns)
-    return cols
+    s = str(val).strip()
+    mobj = _ddmmaa.match(s)
+    if mobj:
+        a = int(mobj.group(1))
+        b = int(mobj.group(2))
+        yy = int(mobj.group(3))
+        Y = 2000 + yy
+        hoy = date.today()
 
-def _infer_cloud_provider(df: pd.DataFrame) -> pd.Series:
-    """Devuelve Serie con 'HUAWEI'/'GCP'/'AZURE'/None buscando keywords en columnas candidatas."""
-    present = _present_text_columns(df)
-    text = df[present].astype(str).agg(" ".join, axis=1).str.lower()
-    choices = [text.str.contains(pat, regex=True, na=False) for pat in CLOUD_KEYWORDS.values()]
-    return np.select(choices, list(CLOUD_KEYWORDS.keys()), default=None)
+        if a > 12 and b <= 12:
+            dt = _try_make_date(Y, b, a)
+            if dt is None:
+                return None, None, None, None
+            return Y, dt.month, dt.day, yy
+        if a <= 12 and b > 12:
+            dt = _try_make_date(Y, a, b)
+            if dt is None:
+                return None, None, None, None
+            return Y, dt.month, dt.day, yy
+
+        dt_ddmm = _try_make_date(Y, b, a)
+        dt_mmdd = _try_make_date(Y, a, b)
+        if dt_ddmm is None and dt_mmdd is None:
+            return None, None, None, None
+
+        if dias_ref is not None and pd.notna(dias_ref):
+            best = None
+            if dt_ddmm:
+                diff1 = abs((hoy - dt_ddmm).days - int(dias_ref))
+                best = ("ddmm", diff1, dt_ddmm)
+            if dt_mmdd:
+                diff2 = abs((hoy - dt_mmdd).days - int(dias_ref))
+                if best is None or diff2 < best[1]:
+                    best = ("mmdd", diff2, dt_mmdd)
+            dt = best[2]
+            return Y, dt.month, dt.day, yy
+
+        if dt_ddmm:
+            if (hoy - dt_ddmm).days >= -1:
+                dt = dt_ddmm
+            elif dt_mmdd:
+                dt = dt_mmdd
+            else:
+                dt = dt_ddmm
+        else:
+            dt = dt_mmdd
+
+        return Y, dt.month, dt.day, yy
+
+    t = pd.to_datetime(s, dayfirst=True, errors="coerce")
+    if pd.isna(t):
+        return None, None, None, None
+    return t.year, t.month, t.day, t.year % 100
 
 
-# ================== Generación de vistas (con filtro de meses) ==================
-def build_auto_views(df: pd.DataFrame):
-    """Genera las vistas/pestañas aplicando el filtro de meses. Por defecto: último mes. Excluye 'Deactivation'."""
-    meses_disponibles = _available_months(df)
+def a_iso_y_display(series: pd.Series, dias_ref_series: pd.Series | None = None) -> tuple[pd.Series, pd.Series]:
+    """Devuelve (ISO 'YYYY-MM-DD', DISPLAY 'DD-MM-AA') usando desambiguación por fila."""
+    iso_vals, disp_vals = [], []
+    for i, v in enumerate(series):
+        dias_ref = None
+        if dias_ref_series is not None:
+            try:
+                dias_ref = dias_ref_series.iloc[i]
+            except Exception:
+                dias_ref = None
+        Y, m, d, yy = _split_ddmmaa(v, dias_ref=dias_ref)
+        if Y is None:
+            iso_vals.append("")
+            disp_vals.append("")
+        else:
+            iso_vals.append(f"{Y:04d}-{m:02d}-{d:02d}")
+            disp_vals.append(f"{d:02d}-{m:02d}-{yy:02d}")
+    return pd.Series(iso_vals, index=series.index), pd.Series(disp_vals, index=series.index)
 
-    # Si no hay selección previa, setear último mes
-    if meses_disponibles and not st.session_state.selected_months:
-        st.session_state.selected_months = [meses_disponibles[-1]]
 
-    df_f = _filter_by_months(df, st.session_state.selected_months)
+# =========================
+# ENCABEZADO
+# =========================
+st.title("Generador de reportes automático")
 
-    # columnas útiles
-    col_sub = _col(df_f, "SUSCRIPCION", "Subscription")
-    col_int = _col(df_f, "INTERACCION", "Interaction")
-    col_cat = _col(df_f, "CATEGORIA", "Order Category")
-    col_est = _col(df_f, "ESTADO", "Order Status")
-    col_ofe = _col(df_f, "OFERTA", "Main Offer")
-    col_res = _col(df_f, "RESPONSABLE", "Responsible", "PM", "Project Manager")
-    col_fcre = _col(df_f, "FECHA DE CREACION", "Order Creation Date", "order_creation_date")
-    col_fact = _col(df_f, "FECHA DE ACTIVACION", "Fecha Activación")
+# =========================
+# --- DESCARGA SUPERSET ---
+st.subheader("Descarga de CSV (Superset)")
 
-    # base limpia (dedup + sin Deactivation)
-    base = df_f.copy()
-    if col_sub and col_int:
-        base = base.drop_duplicates(subset=[col_sub, col_int])
-    if col_cat:
-        base = base[~base[col_cat].astype(str).str.lower().eq("deactivation")]
-
-    views: Dict[str, Dict[str, Any]] = {}
-
-    # 1) Órdenes por PM (dos gráficos pequeños: activas y completadas)
-    if col_res and col_est:
-        estados = base[col_est].astype(str)
-
-        base_prog = base[estados.str.contains(RE_IN_PROGRESS, na=False)].copy()
-        por_res_prog = (
-            base_prog.groupby(col_res, as_index=False)
-                .size().rename(columns={"size": "CANTIDAD"})
-                .sort_values("CANTIDAD", ascending=False)
-                .head(20)
+with st.expander("Opciones de descarga", expanded=True):
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        dashboard_url = st.text_input(
+            "URL del dashboard (permalink con filtros)",
+            value="",
+            placeholder="https://…/superset/dashboard/…?permalink_key=…  (o explore/p/<key>/)",
         )
-
-        base_comp = base[estados.str.contains(RE_COMPLETED, na=False)].copy()
-        por_res_comp = (
-            base_comp.groupby(col_res, as_index=False)
-                .size().rename(columns={"size": "CANTIDAD"})
-                .sort_values("CANTIDAD", ascending=False)
-                .head(20)
+        
+        dest_root = st.text_input(
+            "Carpeta destino",
+            value=str(Path.home() / "Downloads" / "superset_csv")
         )
+    with col2:
+        key_user = st.text_input("Usuario Keycloak", value="")
+        key_pass = st.text_input("Contraseña Keycloak", value="", type="password")
 
-        views["Órdenes por PM"] = {
-            "df": None,
-            "charts": [
-                {"type": "bar", "x": col_res, "y": "CANTIDAD", "title": "Órdenes activas (In Progress)", "data": por_res_prog, "layout": "half"},
-                {"type": "bar", "x": col_res, "y": "CANTIDAD", "title": "Órdenes completadas", "data": por_res_comp, "layout": "half"},
-            ],
-        }
+    # ⬇️ valores ocultos (defaults)
+    MAX_PANELES_DEFAULT = 0      # 0 = todos
+    PANEL_TIMEOUT_DEFAULT = 25   # segundos
+
+    run_dl = st.button("⬇️ Descargar CSVs del dashboard", type="primary")
+
+# zona de logs en vivo
+log_box = st.empty()
+def _log(msg: str):
+    st.session_state.superset_logs.append(msg)
+    log_box.code("\n".join(st.session_state.superset_logs[-150:]), language="text")
+
+if run_dl:
+    st.session_state.superset_logs = []
+    st.session_state.superset_results = []
+
+    if not dashboard_url.strip() or not key_user.strip() or not key_pass:
+        _log("❌ Completá URL, usuario y contraseña de Keycloak.")
     else:
-        views["Órdenes por PM"] = {"df": pd.DataFrame(), "charts": []}
+        day_folder = Path(dest_root) / datetime.now().strftime("%Y-%m-%d")
+        _log(f"🚀 Descargando a: {day_folder.resolve()}")
 
-    # 2) Órdenes por oferta
-    if col_ofe:
-        por_oferta = (
-            base.groupby(col_ofe, as_index=False)
-                .size().rename(columns={"size": "CANTIDAD"})
-                .sort_values("CANTIDAD", ascending=False)
+        files = download_superset_csvs(
+            dashboard_url=dashboard_url.strip(),
+            download_dir=day_folder,
+            keycloak_user=key_user.strip(),
+            keycloak_pass=key_pass.strip(),
+            max_panels=MAX_PANELES_DEFAULT,          # oculto
+            panel_timeout=PANEL_TIMEOUT_DEFAULT,     # oculto
+            headless=False,
+            log=_log,
         )
-        views["Órdenes por oferta"] = {
-            "df": por_oferta,
-            "charts": [{"type": "bar", "x": col_ofe, "y": "CANTIDAD", "title": "Órdenes por oferta"}],
-        }
-    else:
-        views["Órdenes por oferta"] = {"df": pd.DataFrame(), "charts": []}
-
-    # 3) Estados
-    if col_est:
-        por_estado = (
-            base.groupby(col_est, as_index=False)
-                .size().rename(columns={"size": "CANTIDAD"})
-                .sort_values("CANTIDAD", ascending=False)
-        )
-        views["Estados"] = {
-            "df": por_estado,
-            "charts": [{"type": "pie", "x": col_est, "y": "CANTIDAD", "title": "Distribución por estado"}],
-        }
-    else:
-        views["Estados"] = {"df": pd.DataFrame(), "charts": []}
-
-    # 4) Órdenes por categoría
-    if col_cat:
-        por_cat = (
-            base.groupby(col_cat, as_index=False)
-                .size().rename(columns={"size": "CANTIDAD"})
-                .sort_values("CANTIDAD", ascending=False)
-        )
-        views["Órdenes por categoría"] = {
-            "df": por_cat,
-            "charts": [{"type": "bar", "x": col_cat, "y": "CANTIDAD", "title": "Órdenes por categoría"}],
-        }
-    else:
-        views["Órdenes por categoría"] = {"df": pd.DataFrame(), "charts": []}
-
-    # 5) Nubes de terceros (Huawei/GCP/Azure) – SOLO gráfico (sin tabla)
-    fecha_col = col_fcre or col_fact
-    clouds = _infer_cloud_provider(base)
-    base_clouds = base.copy()
-    base_clouds["CLOUD"] = clouds
-    base_clouds = base_clouds[base_clouds["CLOUD"].isin(["HUAWEI", "GCP", "AZURE"])]
-
-    if fecha_col and not base_clouds.empty:
-        tmp = base_clouds.copy()
-        tmp["MES"] = pd.to_datetime(tmp[fecha_col], errors="coerce").dt.to_period("M").astype(str)
-        serie = (
-            tmp.groupby(["MES", "CLOUD"], as_index=False)
-               .size().rename(columns={"size": "CANTIDAD"})
-               .sort_values(["MES", "CLOUD"])
-        )
-        views["Nubes de terceros"] = {
-            "df": None,
-            "charts": [
-                {"type": "line", "x": "MES", "y": "CANTIDAD", "color": "CLOUD", "title": "Órdenes por mes y nube", "data": serie}
-            ],
-        }
-    else:
-        views["Nubes de terceros"] = {"df": pd.DataFrame(), "charts": []}
-
-    # 6) Evolución mensual
-    if fecha_col:
-        tmp_all = base.copy()
-        tmp_all["MES"] = pd.to_datetime(tmp_all[fecha_col], errors="coerce").dt.to_period("M").astype(str)
-        por_mes = (
-            tmp_all.groupby("MES", as_index=False)
-               .size().rename(columns={"size": "CANTIDAD"})
-               .sort_values("MES")
-        )
-        views["Evolución mensual"] = {
-            "df": por_mes,
-            "charts": [
-                {"type": "line", "x": "MES", "y": "CANTIDAD", "title": "Órdenes por mes"},
-                {"type": "area", "x": "MES", "y": "CANTIDAD", "title": "Acumulado mensual"},
-            ],
-        }
-    else:
-        views["Evolución mensual"] = {"df": pd.DataFrame(), "charts": []}
-
-    ordered = {k: views.get(k, {"df": pd.DataFrame(), "charts": []}) for k in VIS_TABS_ORDER}
-    return ordered
+        st.session_state.superset_results = [str(p) for p in files]
 
 
-def render_views(views: Dict[str, Dict[str, Any]]) -> None:
-    """Renderiza las pestañas definidas en VIS_TABS_ORDER con tablas y gráficos."""
-    tabs = st.tabs(VIS_TABS_ORDER)
-    for tab, name in zip(tabs, VIS_TABS_ORDER):
-        with tab:
-            v = views.get(name, {"df": pd.DataFrame(), "charts": []})
-            df_default = v.get("df")
-            charts: List[Dict[str, Any]] = v.get("charts", [])
 
-            # Solo mostramos tabla si df_default no es None/empty.
-            if df_default is not None and isinstance(df_default, pd.DataFrame) and not df_default.empty:
-                ui_dataframe(df_default)
-
-            if charts and HAS_PLOTLY:
-                half_charts = [c for c in charts if c.get("layout") == "half"]
-                other_charts = [c for c in charts if c.get("layout") != "half"]
-
-                for i in range(0, len(half_charts), 2):
-                    c1, c2 = st.columns(2)
-                    for c, holder in zip(half_charts[i:i+2], (c1, c2)):
-                        with holder:
-                            _plot_chart(c, df_default, height=300)
-
-                for cfg in other_charts:
-                    _plot_chart(cfg, df_default, height=420)
-            elif charts and not HAS_PLOTLY:
-                st.info("Instalá 'plotly' para ver los gráficos (pip install plotly).")
-
-def _plot_chart(cfg: Dict[str, Any], df_default: Optional[pd.DataFrame], height: int = 420):
-    ctype = cfg.get("type", "bar")
-    x = cfg.get("x"); y = cfg.get("y"); color = cfg.get("color", None)
-    title = cfg.get("title", "")
-    df = cfg.get("data", df_default)
-    if df is None or df.empty:
-        st.caption("Sin datos para mostrar.")
-        return
-    if ctype == "bar":
-        fig = px.bar(df, x=x, y=y, color=color, title=title)
-    elif ctype == "line":
-        fig = px.line(df, x=x, y=y, color=color, title=title)
-    elif ctype == "area":
-        fig = px.area(df, x=x, y=y, color=color, title=title)
-    elif ctype == "pie":
-        fig = px.pie(df, names=x, values=y if isinstance(y, str) else None, title=title)
-    else:
-        fig = px.bar(df, x=x, y=y, color=color, title=title)
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=40, b=10),
-        height=height,
-        legend=dict(orientation="h", yanchor="bottom", y=-0.2),
+# listado de resultados (si hay) + switch para usarlos en el reporte
+if st.session_state.superset_results:
+    st.success(f"Descargados: {len(st.session_state.superset_results)} CSV")
+    # selección múltiple
+    opciones = st.session_state.superset_results
+    seleccion = st.multiselect(
+        "Elegí qué CSVs usar para el reporte (puede ser más de uno):",
+        options=opciones,
+        default=opciones,  # por defecto, todos
+        format_func=lambda p: Path(p).name,
     )
-    ui_plotly(fig, height=height)
+    st.session_state.csvs_seleccionados = seleccion
+
+    st.toggle(
+        "Usar CSVs descargados como fuente del reporte",
+        key="usar_descargados",
+        value=st.session_state.usar_descargados,
+        help="Si está activo, el botón '▶️ Ejecutar y mostrar' usa estos CSVs en lugar de un archivo subido.",
+    )
+
+st.divider()
 
 
-def build_excel_from_views(views: Dict[str, Dict[str, Any]]) -> bytes:
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        for sheet_name in VIS_TABS_ORDER:
-            v = views.get(sheet_name, {})
-            df = v.get("df")
-            if df is None or df.empty:
-                continue
-            safe = str(sheet_name)[:31]
-            df.to_excel(writer, index=False, sheet_name=safe)
-    buf.seek(0)
-    return buf.read()
+# =========================
+# LAYOUT SUPERIOR: ARCHIVO | SCRIPT
+# =========================
+c_archivo, c_script = st.columns([3, 2], gap="large")
 
+with c_archivo:
+    st.subheader("Archivo")
+    if "archivo_cargado" not in st.session_state:
+        st.session_state.archivo_cargado = None
 
-# ================== PANEL COMPACTO: subir/ejecutar (dos columnas) ==================
-c_left, c_right = st.columns(2)
+    if st.session_state.archivo_cargado is None:
+        archivo = st.file_uploader("Drag and drop o Browse files", type=["csv", "xlsx"], key="uploader")
+        if archivo is not None:
+            st.session_state.archivo_cargado = archivo
+            st.success(f"Archivo '{archivo.name}' cargado.")
+    else:
+        st.info(f"Archivo listo: **{st.session_state.archivo_cargado.name}**")
+        if st.button("Borrar archivo y subir otro", type="secondary"):
+            st.session_state.archivo_cargado = None
+            st.experimental_rerun()
 
-with c_left:
-    st.subheader("📥 Archivo")
-    uploaded = st.file_uploader("Seleccioná el CSV", type="csv", label_visibility="collapsed")
-    if uploaded:
-        st.session_state.uploaded_file = uploaded
+with c_script:
+    st.subheader("Script")
+    script_opciones = {"Reporte general": "reporte_general.py"}
+    elegido = st.selectbox("Elegí el script a ejecutar", list(script_opciones.keys()))
+    st.caption(f"Seleccionado: **{script_opciones[elegido]}**")
 
-with c_right:
-    st.subheader("⚙️ Script")
-    opcion = st.selectbox("Tipo de procesamiento", ["", "Reporte General", "Script 2"], index=0, label_visibility="collapsed")
-    if st.session_state.uploaded_file:
-        st.markdown(f"<span class='badge'>Archivo: {st.session_state.uploaded_file.name}</span>", unsafe_allow_html=True)
-        if ui_button("❌ Eliminar archivo", key="delete_file", type="secondary"):
-            st.session_state.uploaded_file = None
-            st.session_state.selected_months = []
-            st.rerun()
+st.divider()
 
-# Botón centrado abajo (depende de ambas columnas)
-col1, col2, col3 = st.columns([3, 1, 3])
-with col2:
-    run_clicked = ui_button("▶️ Ejecutar y mostrar", type="primary")
+# =========================
+# BOTÓN: EJECUTAR Y MOSTRAR
+# =========================
+ejecutar = st.button("▶️ Ejecutar y mostrar", type="primary")
 
+if "excel_bytes" not in st.session_state:
+    st.session_state.excel_bytes = None
+    st.session_state.excel_name = None
 
-# ================== Ejecutar y VISUALIZAR ==================
-if st.session_state.uploaded_file and opcion and opcion != "" and run_clicked:
-    df_input = pd.read_csv(st.session_state.uploaded_file)
+if ejecutar:
+    try:
+        buffer = BytesIO()
 
-    # Excel (se mantiene)
-    out_excel = io.BytesIO()
-    if opcion == "Reporte General":
-        try:
-            df_excel = _normalize_for_excel(df_input)  # normalizo SOLO para el Excel
-            procesar_reporte_general(df_excel, out_excel)
-        except TypeError:
-            pass
-    elif opcion == "Script 2":
-        procesar_script2(df_input, out_excel)
-    out_excel.seek(0)
-    payload = out_excel.read()
+        # Fuente: CSVs descargados (si así lo elegiste y hay selección válida)
+        if st.session_state.usar_descargados:
+            rutas = [p for p in (st.session_state.csvs_seleccionados or []) if os.path.exists(p)]
+            if not rutas:
+                st.error("Activaste 'Usar CSVs descargados', pero no hay CSVs seleccionados disponibles.")
+                st.stop()
+            df = leer_fuentes_csv_multiples(rutas)
+            st.info(f"Usando {len(rutas)} CSV(s) descargados como fuente ({len(df)} filas).")
+        else:
+            # Fuente: archivo subido
+            if st.session_state.archivo_cargado is None:
+                st.error("Subí un archivo (CSV/XLSX) o activa 'Usar CSVs descargados'.")
+                st.stop()
+            df = leer_fuente(st.session_state.archivo_cargado)
 
-    # Vistas iniciales (setea mes por defecto si aplica) y guardado en historial
-    views = build_auto_views(df_input)
-    nombre_reporte = f"reporte_general_{datetime.today().strftime('%Y-%m-%d')}.xlsx"
-    st.session_state.history.insert(0, {
-        "filename": nombre_reporte,
-        "payload": payload if payload else build_excel_from_views(views),
-        "script": opcion,
-        "when": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "views": views,
-        "df_raw": df_input.copy(),
-    })
-    st.session_state.history = st.session_state.history[:MAX_HISTORY]
+        # Ejecutar el pipeline
+        procesar_reporte_general(df, buffer)
+        buffer.seek(0)
 
+        # Guardar a disco + sesión
+        nombre = nombre_salida()
+        ruta = os.path.join("outputs", nombre)
+        with open(ruta, "wb") as f:
+            f.write(buffer.getbuffer())
 
-# ================== Historial + Filtro de meses (FORM) + Visualización ==================
-st.subheader("🗂️ Historial & Filtro")
+        st.session_state.excel_bytes = buffer.getvalue()
+        st.session_state.excel_name = nombre
+        st.success(f"Reporte generado: **{nombre}**")
+    except Exception as e:
+        st.error(f"Ocurrió un error al ejecutar el script: {e}")
 
-if not st.session_state.history:
-    st.caption("Todavía no generaste reportes en esta sesión.")
-else:
-    # fila compacta: selector + acciones
-    col_h1, col_h2 = st.columns([3, 2])
-    with col_h1:
-        labels = [f"{i+1}. {h['filename']} · {h['script']} · {h['when']}" for i, h in enumerate(st.session_state.history)]
-        sel = st.selectbox("Reporte", options=list(range(len(labels))), format_func=lambda i: labels[i], label_visibility="collapsed")
-    with col_h2:
-        c_dl, c_clr = st.columns(2)
-        current = st.session_state.history[sel]   # <<<<<< define current acá
-        with c_dl:
-            ui_download_button(
-                "📥 Descargar Excel",
-                data=current["payload"],
-                file_name=current["filename"],
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"download_history_{sel}",
-            )
-        with c_clr:
-            if ui_button("🧹 Limpiar historial"):
-                st.session_state.history = []
-                st.session_state.selected_months = []
-                st.rerun()
+# =========================
+# DESCARGA DEL EXCEL
+# =========================
+if st.session_state.excel_bytes:
+    st.download_button(
+        "📥 Descargar Excel generado",
+        data=st.session_state.excel_bytes,
+        file_name=st.session_state.excel_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
-    # ======= Filtro de meses =======
-    st.markdown("##### 🗓️ Filtro de meses")
-    df_for_filter = current["df_raw"]
-    meses_disponibles = _available_months(df_for_filter)
+# =========================
+# VISUALIZACIÓN
+# =========================
+_estilos_tabs()
+st.header("Visualización")
+tabs = st.tabs(["Todas las Órdenes", "Nubes de terceros", "Bajas"])
 
-    # Bootstrap: si no hay selección previa, por defecto el último mes (si existe)
-    if not st.session_state.get("selected_months"):
-        st.session_state["selected_months"] = [meses_disponibles[-1]] if meses_disponibles else []
+with tabs[0]:
+    st.subheader("Todas las Órdenes")
+    df_all, origen = cargar_hoja_todas_las_ordenes()
+    if df_all is None or df_all.empty:
+        st.info("Generá el reporte o asegurate de tener el Excel del día en /outputs.")
+    else:
+        st.caption(f"Fuente: **{origen}**")
+        render_tab_todas_ordenes(df_all)
 
-    with st.form("months_form", clear_on_submit=False):
-        # NO usamos key. Tomamos el default desde session_state y luego usamos el valor devuelto por el widget.
-        sel_months = st.multiselect(
-            "Seleccioná uno o más meses",
-            options=meses_disponibles,
-            default=st.session_state["selected_months"],
-        )
+with tabs[1]:
+    st.subheader("Nubes de terceros")
+    df_all, origen = cargar_hoja_todas_las_ordenes()
+    if df_all is None or df_all.empty:
+        st.info("Generá el reporte o asegurate de tener el Excel del día en /outputs.")
+    else:
+        st.caption(f"Fuente: **{origen}**")
+        render_tab_nubes_terceros(df_all)
 
-        col_f1, col_f2, col_f3, col_f4 = st.columns([1, 1, 1, 1])
-        apply_btn  = col_f1.form_submit_button("✅ Aplicar meses")
-        ultimo_btn = col_f2.form_submit_button("📅 Último mes")
-        clear_btn  = col_f3.form_submit_button("🗑️ Limpiar selección")
-        all_btn    = col_f4.form_submit_button("📆 Todos los meses")
-
-    # Acciones del form (prioridad: limpiar > último > todos > aplicar)
-    if clear_btn:
-        st.session_state["selected_months"] = []
-        st.rerun()
-    elif ultimo_btn:
-        last = [meses_disponibles[-1]] if meses_disponibles else []
-        st.session_state["selected_months"] = last
-        st.rerun()
-    elif all_btn:
-        st.session_state["selected_months"] = meses_disponibles.copy()
-        st.rerun()
-    elif apply_btn:
-        st.session_state["selected_months"] = sel_months
-
-    st.divider()
-
-    # === Reconstruir vistas con el filtro actual (fuera del form y de los if/elif) ===
-    views_filtered = build_auto_views(df_for_filter)
-    st.markdown("### 📊 Visualización")
-    render_views(views_filtered)
+with tabs[2]:
+    st.subheader("Bajas")
+    df_all, origen = cargar_hoja_todas_las_ordenes()
+    if df_all is None or df_all.empty:
+        st.info("Generá el reporte o asegurate de tener el Excel del día en /outputs.")
+    else:
+        st.caption(f"Fuente: **{origen}**")
+        render_tab_bajas(df_all) 
